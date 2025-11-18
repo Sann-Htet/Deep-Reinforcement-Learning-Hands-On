@@ -84,3 +84,93 @@ class Discriminator(nn.Module):
         conv_out = self.conv_pipe(x)
         return conv_out.view(-1, 1).squeeze(dim=1)
     
+
+class Generator(nn.Module):
+    def __init__(self, output_shape):
+        super(Generator, self).__init__()
+        # pipe deconvolves input vector into (3, 64, 64) image
+        self.pipe = nn.Sequential(
+            nn.ConvTranspose2d(in_channels=LATENT_VECTOR_SIZE, out_channels=GENER_FILTERS * 8,
+                               kernel_size=4, stride=1, padding=0),
+            nn.BatchNorm2d(GENER_FILTERS * 8),
+            nn.ReLU(),
+            nn.ConvTranspose2d(in_channels=GENER_FILTERS * 8, out_channels=GENER_FILTERS * 4,
+                               kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(GENER_FILTERS * 4),
+            nn.ReLU(),
+            nn.ConvTranspose2d(in_channels=GENER_FILTERS * 4, out_channels=GENER_FILTERS * 2,
+                               kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(GENER_FILTERS * 2),
+            nn.ReLU(),
+            nn.ConvTranspose2d(in_channels=GENER_FILTERS * 2, out_channels=GENER_FILTERS,
+                               kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(GENER_FILTERS),
+            nn.ReLU(),
+            nn.ConvTranspose2d(in_channels=GENER_FILTERS, out_channels=output_shape[0],
+                               kernel_size=4, stride=2, padding=1),
+            nn.Tanh()
+        )
+
+    def forward(self, x):
+        return self.pipe(x)
+    
+
+def iterate_batches(envs: tt.List[gym.Env],
+                    batch_size: int = BATCH_SIZE) -> tt.Generator[torch.Tensor, None, None]:
+    batch = [e.reset()[0] for e in envs]
+    env_gen = iter(lambda: random.choice(envs), None)
+
+    while True:
+        e = next(env_gen)
+        action = e.action_space.sample()
+        obs, reward, is_done, is_trunc, _ = e.step(action)
+        if np.mean(obs) > 0.01:
+            batch.append(obs)
+        if len(batch) == batch_size:
+            batch_np = np.array(batch, dtype=np.float32)
+            # Normalising input to [-1..1] and convert to tensor
+            yield torch.tensor(batch_np * 2.0 / 255.0 - 1.0)
+            batch.clear()
+        if is_done or is_trunc:
+            e.reset()
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dev", default="cpu", help="Device name, default=cpu")
+    args = parser.parse_args()
+
+    device = torch.device(args.dev)
+    envs = [
+        InputWrapper(gym.make(name))
+        for name in ('Breakout-v4', 'AirRaid-v4', 'Pong-v4')
+    ]
+    shape = envs[0].observation_space.shape
+
+    net_discr = Discriminator(input_shape=shape).to(device)
+    net_gener = Generator(output_shape=shape).to(device)
+
+    objective = nn.BCELoss()
+    gen_optimizer = optim.Adam(params=net_gener.parameters(), lr=LEARNING_RATE,
+                               betas=(0.5, 0.999))
+    dis_optimizer = optim.Adam(params=net_discr.parameters(), lr=LEARNING_RATE,
+                               betas=(0.5, 0.999))
+    writer = SummaryWriter()
+
+    gen_losses = []
+    dis_losses = []
+    iter_no = 0
+
+    true_labels_v = torch.ones(BATCH_SIZE, device=device)
+    fake_labels_v = torch.zeros(BATCH_SIZE, device=device)
+    ts_start = time.time()
+
+    for batch_v in iterate_batches(envs):
+        # fake samples, input is 4D: batch, filters, x, y
+        gen_input_v = torch.FloatTensor(BATCH_SIZE, LATENT_VECTOR_SIZE, 1, 1)
+        gen_input_v.normal_(0, 1)
+        gen_input_v = gen_input_v.to(device)
+        batch_v = batch_v.to(device)
+        gen_output_v = net_gener(gen_input_v)
+
+        # train discriminator
