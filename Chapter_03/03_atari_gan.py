@@ -193,7 +193,7 @@ if __name__ == "__main__":
 
         iter_no += 1
         if iter_no % REPORT_EVERY_ITER == 0:
-            dt = time.time() - ts_start()
+            dt = time.time() - ts_start
             log.info("Iter %d in %.2fs: gen_loss=%.3e, dis_loss=%.3e",
                      iter_no, dt, np.mean(gen_losses), np.mean(dis_losses))
             ts_start = time.time()
