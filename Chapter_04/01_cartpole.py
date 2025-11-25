@@ -65,4 +65,55 @@ def iterate_batches(env: gym.Env, net: Net, batch_size: int) -> tt.Generator[tt.
                 batch = []
         obs = next_obs
 
+
+def filter_batch(batch: tt.List[Episode], percentile: float) -> \
+        tt.Tuple[torch.FloatTensor, torch.LongTensor, float, float]:
+    rewards = list(map(lambda s: s.reward, batch))
+    reward_bound = float(np.percentile(rewards, percentile))
+    reward_mean = float(np.mean(rewards))
+
+    train_obs: tt.List[np.ndarray] = []
+    train_act: tt.List[int] = []
+    for episode in batch:
+        if episode.reward < reward_bound:
+            continue
+        train_obs.extend(map(lambda step: step.observation, episode.steps))
+        train_act.extend(map(lambda step: step.action, episode.steps))
     
+    train_obs_v = torch.FloatTensor(np.vstack(train_obs))
+    train_act_v = torch.LongTensor(train_act)
+    return train_obs_v, train_act_v, reward_bound, reward_mean
+
+
+if __name__ == "__main__":
+    env = gym.make("CartPole-v1", render_mode="rgb_array")
+    env = gym.wrappers.RecordVideo(env, video_folder="video")
+    assert env.observation_space.shape is not None
+    obs_size = env.observation_space.shape[0]
+    assert isinstance(env.action_space, gym.spaces.Discrete)
+    n_actions = int(env.action_space.n)
+
+    net = Net(obs_size, HIDDEN_SIZE, n_actions)
+    print(net)
+    objective = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(params=net.parameters(), lr=0.01)
+    writer = SummaryWriter(comment="-cartpole")
+
+    for iter_no, batch in enumerate(iterate_batches(env, net, BATCH_SIZE)):
+        obs_v, acts_v, reward_b, reward_m = filter_batch(batch, PERCENTILE)
+        optimizer.zero_grad()
+        action_scores_v = net(obs_v)
+        loss_v = objective(action_scores_v, acts_v)
+        loss_v.backward()
+        optimizer.step()
+        print("%d: loss=%.3f, reward_mean=%.1f, rw_bound=%.1f" % (
+            iter_no, loss_v.item(), reward_m, reward_b
+        ))
+        writer.add_scalar("loss", loss_v.item(), iter_no)
+        writer.add_scalar("reward_bound", reward_b, iter_no)
+        writer.add_scalar("reward_mean", reward_m, iter_no)
+        if reward_m > 475:
+            print("Solved!")
+            break
+    env.close()
+    writer.close()
