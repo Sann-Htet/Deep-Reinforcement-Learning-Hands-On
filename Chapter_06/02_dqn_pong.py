@@ -47,7 +47,7 @@ class Experience:
     action: Action
     reward: float
     done_trunc: bool
-    next_state: State
+    new_state: State
 
 
 class ExperienceBuffer:
@@ -106,3 +106,43 @@ class Agent:
         return done_reward
     
 
+def batch_to_tensors(batch: tt.List[Experience], device: torch.device) -> BatchTensors:
+    states, actions, rewards, dones, new_state = [], [], [], [], []
+    for e in batch:
+        states.append(e.state)
+        actions.append(e.action)
+        rewards.append(e.reward)
+        dones.append(e.done_trunc)
+        new_state.append(e.new_state)
+    states_t = torch.as_tensor(np.asarray(states))
+    actions_t = torch.LongTensor(actions)
+    rewards_t = torch.FloatTensor(rewards)
+    dones_t = torch.BoolTensor(dones)
+    new_states_t = torch.as_tensor(np.asarray(new_state))
+    return states_t.to(device), actions_t.to(device), rewards_t.to(device), \
+           dones_t.to(device), new_states_t.to(device)
+
+
+def calc_loss(batch: tt.List[Experience], net: dqn_model.DQN, tgt_net: dqn_model.DQN,
+              device: torch.device) -> torch.Tensor:
+    states_t, actions_t, rewards_t, dones_t, new_states_t = batch_to_tensors(batch, device)
+
+    state_action_values = net(states_t).gather(
+        1, actions_t.unsqueeze(-1)
+    ).squeeze(-1)
+    with torch.no_grad():
+        next_state_values = tgt_net(new_states_t).max(1)[0]
+        next_state_values[dones_t] = 0.0
+        next_state_values = next_state_values.detach()
+    
+    expected_state_action_values = next_state_values * GAMMA + rewards_t
+    return nn.MSELoss()(state_action_values, expected_state_action_values)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dev", default="cpu", help="Device name, default=cpu")
+    parser.add_argument("--env", default=DEFAULT_ENV_NAME,
+                        help="Name of the environment, default=" + DEFAULT_ENV_NAME)
+    args = parser.parse_args()
+    device = torch.device(args.dev)
