@@ -24,4 +24,4 @@ class DQN(nn.Module):
     def forward(self, x: torch.ByteTensor):
         # scale on GPU
         xx = x / 255.0
-        return self.fnc(self.conv(xx))
+        return self.fc(self.conv(xx))
