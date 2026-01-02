@@ -1,3 +1,4 @@
 *.epub
 .venv
 /runs
+/PongNoFrameskip-v4-best_19.dat
