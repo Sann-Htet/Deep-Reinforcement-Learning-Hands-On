@@ -159,9 +159,145 @@ def setup_ignite(
         tuner_reward_episode: int = 100, tuner_reward_min: float = -19,
 ):
     handler = ptan_ignite.EndOfEpisodeHandler(
-        exp_source, bound_avg_reward=params.stop_reward
-    )
+        exp_source, bound_avg_reward=params.stop_reward)
     handler.attach(engine)
     ptan_ignite.EpisodeFPSHandler().attach(engine)
 
-    
+    @engine.on(ptan_ignite.EpisodeEvents.EPISODE_COMPLETED)
+    def episode_completed(trainer: Engine):
+        passed = trainer.state.metrics.get('time_passed', 0)
+        print("Episode %d: reward=%.0f, steps=%s, speed=%.1f f/s, elapsed=%s" %(
+            trainer.state.episode, trainer.state.episode_reward,
+            trainer.state.episode_steps, trainer.state.metrics.get('avg_fps', 0),
+            timedelta(seconds=int(passed))
+        ))
+
+    @engine.on(ptan_ignite.EpisodeEvents.BOUND_REWARD_REACHED)
+    def game_solved(trainer: Engine):
+        passed = trainer.state.metrics['time_passed']
+        print("Game solved in %s, after %d episodes and %d iterations!" %(
+            timedelta(seconds=int(passed)), trainer.state.episode,
+            trainer.state.iteration))
+        trainer.should_terminate = True
+        trainer.state.solved = True
+
+    now = datetime.now().isoformat(timespec='minutes').replace(':', '')
+    logdir = f"runs/{now}-{params.run_name}-{run_name}"
+    tb = tb_logger.TensorboardLogger(log_dir=logdir)
+    run_avg = RunningAverage(output_transform=lambda v: v['loss'])
+    run_avg.attach(engine, "avg_loss")
+
+    metrics = ['reward', 'steps', 'avg_reward']
+    handler = tb_logger.OutputHandler(tag="episodes", metric_names=metrics)
+    event = ptan_ignite.EpisodeEvents.EPISODE_COMPLETED
+    tb.attach(engine, log_handler=handler, event_name=event)
+
+    # write to tensorboard every 100 iterations
+    ptan_ignite.PeriodEvents().attach(engine)
+    metrics = ['avg_loss', 'avg_fps']
+    metrics.extend(extra_metrics)
+    handler = tb_logger.OutputHandler(tag="train", metric_names=metrics,
+                                      output_transform=lambda a: a)
+    event = ptan_ignite.PeriodEvents.ITERS_100_COMPLETED
+    tb.attach(engine, log_handler=handler, event_name=event)
+
+    if params.tuner_mode:
+        @engine.on(ptan_ignite.EpisodeEvents.EPISODE_COMPLETED)
+        def episode_completed(trainer: Engine):
+            avg_reward = trainer.state.metrics.get('avg_reward')
+            max_episodes = params.episodes_to_solve * 1.1
+            if trainer.state.episode > tuner_reward_episode and \
+                    avg_reward < tuner_reward_min:
+                trainer.should_terminate = True
+                trainer.state.solved = False
+            elif trainer.state.episode > max_episodes:
+                trainer.should_terminate = True
+                trainer.state.solved = False
+            if trainer.should_terminate:
+                print(f"Episode {trainer.state.episode}, "
+                      f"avg_reward {avg_reward:.2f}, terminating")
+                
+
+# hyperparams tuner
+TrainFunc = tt.Callable[
+    [Hyperparams, torch.device, dict],
+    tt.Optional[int]
+]
+
+BASE_SPACE = {
+    "learning_rate": tune.loguniform(1e-5, 1e-4),
+    "gamma": tune.choice([0.9, 0.92, 0.95, 0.98, 0.99, 0.995]),
+}
+
+def tune_params(
+        base_params: Hyperparams, train_func: TrainFunc, device: torch.device,
+        samples: int = 10, extra_space: tt.Optional[tt.Dict[str, tt.Any]] = None,
+):
+    """
+    Perform hyperparameters tune.
+    :param train_func: Train function, has to return "episodes" key with metric
+    :param device: torch device
+    :param samples: count of samples to perform
+    :param extra_space: additional search space
+    """
+    search_space = dict(BASE_SPACE)
+    if extra_space is not None:
+        search_space.update(extra_space)
+    config = tune.TuneConfig(num_samples=samples)
+
+    def objective(config: dict, device: torch.device) -> dict:
+        keys = dataclasses.asdict(base_params).keys()
+        upd = {"tuner_mode": True}
+        for k, v in config.items():
+            if k in keys:
+                upd[k] = v
+        params = dataclasses.replace(base_params, **upd)
+        res = train_func(params, device, config)
+        return {"episodes": res if res is not None else 10**6}
+
+    obj = tune.with_parameters(objective, device=device)
+    if device.type == "cuda":
+        obj = tune.with_resources(obj, {"gpu": 1})
+    tuner = tune.Tuner(obj, param_space=search_space, tune_config=config)
+    results = tuner.fit()
+    best = results.get_best_result(metric="episodes", mode="min")
+    print(best.config)
+    print(best.metrics)
+
+
+def argparser():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--dev", default="cpu", help="Device to use, default=cpu")
+    parser.add_argument(
+        "--params", choices=('common', 'best'), default="best",
+        help="Params to use for training or tuning, default=best"
+    )
+    parser.add_argument(
+        "--tune", type=int, help="Steps of params tune")
+    return parser
+
+
+def train_or_tune(
+        args: argparse.Namespace,
+        train_func: TrainFunc,
+        best_params: Hyperparams,
+        extra_params: tt.Optional[dict] = None,
+        extra_space: tt.Optional[dict] = None,
+):
+    random.seed(SEED)
+    torch.manual_seed(SEED)
+    device = torch.device(args.dev)
+
+    if args.params == "common":
+        params = GAME_PARAMS['pong']
+    else:
+        params = best_params
+
+    if extra_params is None:
+        extra_params = {}
+    if args.tune is None:
+        train_func(params, device, extra_params)
+    else:
+        tune_params(params, train_func, device, samples=args.tune,
+                    extra_space=extra_space)
