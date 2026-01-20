@@ -166,16 +166,15 @@ def setup_ignite(
     @engine.on(ptan_ignite.EpisodeEvents.EPISODE_COMPLETED)
     def episode_completed(trainer: Engine):
         passed = trainer.state.metrics.get('time_passed', 0)
-        print("Episode %d: reward=%.0f, steps=%s, speed=%.1f f/s, elapsed=%s" %(
+        print("Episode %d: reward=%.0f, steps=%s, speed=%.1f f/s, elapsed=%s" % (
             trainer.state.episode, trainer.state.episode_reward,
             trainer.state.episode_steps, trainer.state.metrics.get('avg_fps', 0),
-            timedelta(seconds=int(passed))
-        ))
+            timedelta(seconds=int(passed))))
 
     @engine.on(ptan_ignite.EpisodeEvents.BOUND_REWARD_REACHED)
     def game_solved(trainer: Engine):
         passed = trainer.state.metrics['time_passed']
-        print("Game solved in %s, after %d episodes and %d iterations!" %(
+        print("Game solved in %s, after %d episodes and %d iterations!" % (
             timedelta(seconds=int(passed)), trainer.state.episode,
             trainer.state.iteration))
         trainer.should_terminate = True
@@ -193,7 +192,7 @@ def setup_ignite(
     tb.attach(engine, log_handler=handler, event_name=event)
 
     # write to tensorboard every 100 iterations
-    ptan_ignite.PeriodEvents().attach(engine)
+    ptan_ignite.PeriodicEvents().attach(engine)
     metrics = ['avg_loss', 'avg_fps']
     metrics.extend(extra_metrics)
     handler = tb_logger.OutputHandler(tag="train", metric_names=metrics,
@@ -216,7 +215,7 @@ def setup_ignite(
             if trainer.should_terminate:
                 print(f"Episode {trainer.state.episode}, "
                       f"avg_reward {avg_reward:.2f}, terminating")
-                
+
 
 # hyperparams tuner
 TrainFunc = tt.Callable[
