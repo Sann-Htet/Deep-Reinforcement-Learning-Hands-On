@@ -56,3 +56,53 @@ class NoisyDQN(nn.Module):
              (layer.weight_sigma ** 2).mean().sqrt()).item()
             for layer in self.noisy_layers
         ]
+
+
+class PrioReplayBuffer(ExperienceReplayBuffer):
+    def __init__(self, exp_source: ExperienceSource, buf_size: int,
+                 prob_alpha: float = 0.6):
+        super().__init__(exp_source, buf_size)
+        self.experience_source_iter = iter(exp_source)
+        self.capacity = buf_size
+        self.pos = 0
+        self.buffer = []
+        self.prob_alpha = prob_alpha
+        self.priorities = np.zeros((buf_size, ), dtype=np.float32)
+        self.beta = BETA_START
+
+    def update_beta(self, idx: int) -> float:
+        v = BETA_START + idx * (1.0 - BETA_START) / BETA_FRAMES
+        self.beta = min(1.0, v)
+        return self.beta
+
+    def populate(self, count: int):
+        max_prio = self.priorities.max(initial=1.0)
+        for _ in range(count):
+            sample = next(self.experience_source_iter)
+            if len(self.buffer) < self.capacity:
+                self.buffer.append(sample)
+            else:
+                self.buffer[self.pos] = sample
+            self.priorities[self.pos] = max_prio
+            self.pos = (self.pos + 1) % self.capacity
+
+    def sample(self, batch_size: int) -> tt.Tuple[
+        tt.List[ExperienceFirstLast], np.ndarray, np.ndarray
+    ]:
+        if len(self.buffer) == self.capacity:
+            prios = self.priorities
+        else:
+            prios = self.priorities[:self.pos]
+        probs = prios ** self.prob_alpha
+        probs /= probs.sum()
+
+        indices = np.random.choice(len(self.buffer), batch_size, p=probs)
+        samples = [self.buffer[idx] for idx in indices]
+        total = len(self.buffer)
+        weights = (total * probs[indices]) ** (-self.beta)
+        weights /= weights.max()
+        return samples, indices, np.array(weights, dtype=np.float32)
+
+    def update_priorities(self, batch_indices: np.ndarray, batch_priorities: np.ndarray):
+        for idx, prio in zip(batch_indices, batch_priorities):
+            self.priorities[idx] = prio
