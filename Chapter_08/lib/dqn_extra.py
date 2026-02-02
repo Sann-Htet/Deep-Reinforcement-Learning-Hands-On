@@ -141,7 +141,51 @@ class DuelingDQN(nn.Module):
         xx = x / 255.0
         conv_out = self.conv(xx)
         return self.fc_adv(conv_out), self.fc_val(conv_out)
-    
+
+
+class DistributionalDQN(nn.Module):
+    def __init__(self, input_shape: tt.Tuple[int, ...], n_actions: int):
+        super(DistributionalDQN, self).__init__()
+
+        self.conv = nn.Sequential(
+            nn.Conv2d(input_shape[0], 32, kernel_size=8, stride=4),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=4, stride=2),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1),
+            nn.ReLU(),
+            nn.Flatten()
+        )
+        size = self.conv(torch.zeros(1, *input_shape)).size()[-1]
+        self.fc = nn.Sequential(
+            nn.Linear(size, 512),
+            nn.ReLU(),
+            nn.Linear(512, n_actions * N_ATOMS)
+        )
+
+        sups = torch.arange(Vmin, Vmax + DELTA_Z, DELTA_Z)
+        self.register_buffer("supports", sups)
+        self.softmax = nn.Softmax(dim=1)
+
+    def forward(self, x: torch.ByteTensor) -> torch.Tensor:
+        batch_size = x.size()[0]
+        xx = x / 255
+        fc_out = self.fc(self.conv(xx))
+        return fc_out.view(batch_size, -1, N_ATOMS)
+
+    def both(self, x: torch.ByteTensor) -> tt.Tuple[torch.Tensor, torch.Tensor]:
+        cat_out = self(x)
+        probs = self.apply_softmax(cat_out)
+        weights = probs * self.supports
+        res = weights.sum(dim=2)
+        return cat_out, res
+
+    def qvals(self, x: torch.ByteTensor) -> torch.Tensor:
+        return self.both(x)[1]
+
+    def apply_softmax(self, t: torch.Tensor) -> torch.Tensor:
+        return self.softmax(t.view(-1, N_ATOMS)).view(t.size())
+
 
 def distr_projection(next_distr: np.ndarray, rewards: np.ndarray,
                      dones: np.ndarray, gamma: float):
